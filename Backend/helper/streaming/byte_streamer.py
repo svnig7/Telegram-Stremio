@@ -43,10 +43,15 @@ from Backend.pyrofork.bot import (
     work_loads,
 )
 
+_AUTH_KEYS: Dict[Tuple[int, int], bytes] = {}
+_WARM_DCS = (1, 2, 4, 5)
+
 
 class ByteStreamer:
     CHUNK_SIZE = 1024 * 1024
     CLEAN_INTERVAL = 30 * 60
+    _CROSS_DC_PARALLEL_MIN = 8
+    _CROSS_DC_PREFETCH_MIN = 8
     _instances: Dict[int, "ByteStreamer"] = {}
 
     def __init__(self, client: Client, client_index: int = -1):
@@ -61,45 +66,79 @@ class ByteStreamer:
         _ensure_stale_cleaner()
 
     async def _prewarm_sessions(self):
-        common_dcs = [1, 2, 4, 5]
-        test_mode = await self.client.storage.test_mode()
-        current_dc = await self.client.storage.dc_id()
-        for dc in common_dcs:
+        try:
+            test_mode = await self.client.storage.test_mode()
+            current_dc = await self.client.storage.dc_id()
+        except Exception:
+            return
+        if not hasattr(self.client, "media_sessions"):
+            self.client.media_sessions = {}
+        for dc in _WARM_DCS:
             if dc in self.client.media_sessions or dc == current_dc:
                 continue
             try:
-                auth_key = await Auth(self.client, dc, test_mode).create()
-                session = Session(self.client, dc, auth_key, test_mode, is_media=True)
-                session.no_updates = True
-                session.timeout = 30
-                session.sleep_threshold = 60
-                await session.start()
-                imported = False
-                for _ in range(6):
-                    try:
-                        exported = await self.client.invoke(
-                            raw.functions.auth.ExportAuthorization(dc_id=dc)
-                        )
-                        await session.send(
-                            raw.functions.auth.ImportAuthorization(
-                                id=exported.id,
-                                bytes=exported.bytes,
-                            )
-                        )
-                        imported = True
-                        break
-                    except AuthBytesInvalid:
-                        await asyncio.sleep(0.5)
-                    except OSError:
-                        await asyncio.sleep(1)
-                    except Exception:
-                        break
-                if imported:
-                    self.client.media_sessions[dc] = session
-                else:
-                    await session.stop()
+                await self._open_media_session(dc, test_mode, current_dc)
             except Exception:
                 continue
+
+    async def _open_media_session(self, dc: int, test_mode: bool, current_dc: int) -> Session:
+        if not hasattr(self.client, "media_sessions"):
+            self.client.media_sessions = {}
+        existing = self.client.media_sessions.get(dc)
+        if existing:
+            return existing
+
+        client_id = getattr(getattr(self.client, "me", None), "id", None) or id(self.client)
+        auth_id = (client_id, dc)
+        cached_ak = _AUTH_KEYS.get(auth_id)
+
+        if dc == current_dc:
+            auth_key = await self.client.storage.auth_key()
+            is_cross = False
+        elif cached_ak is not None:
+            auth_key = cached_ak
+            is_cross = True
+        else:
+            auth_key = await Auth(self.client, dc, test_mode).create()
+            is_cross = True
+
+        session = Session(self.client, dc, auth_key, test_mode, is_media=True)
+        session.no_updates = True
+        session.timeout = 30
+        session.sleep_threshold = 60
+        await session.start()
+
+        if is_cross and cached_ak is None:
+            imported = False
+            for _ in range(6):
+                try:
+                    exported = await self.client.invoke(
+                        raw.functions.auth.ExportAuthorization(dc_id=dc)
+                    )
+                    await session.send(
+                        raw.functions.auth.ImportAuthorization(
+                            id=exported.id,
+                            bytes=exported.bytes,
+                        )
+                    )
+                    imported = True
+                    _AUTH_KEYS[auth_id] = auth_key
+                    break
+                except AuthBytesInvalid:
+                    await asyncio.sleep(0.5)
+                except OSError:
+                    await asyncio.sleep(1)
+                except Exception:
+                    break
+            if not imported:
+                try:
+                    await session.stop()
+                except Exception:
+                    pass
+                raise RuntimeError(f"Auth export/import failed for DC {dc}")
+
+        self.client.media_sessions[dc] = session
+        return session
 
     async def get_file_properties(self, chat_id: int, message_id: int) -> FileId:
         cache_key = (int(chat_id), int(message_id))
@@ -132,6 +171,31 @@ class ByteStreamer:
         if not stream_id:
             stream_id = secrets.token_hex(8)
 
+        try:
+            home_dc = await self.client.storage.dc_id()
+        except Exception:
+            home_dc = 0
+        file_dc = getattr(file_id, "dc_id", 0) or 0
+        cross_dc = bool(file_dc and home_dc and file_dc != home_dc)
+
+        if cross_dc:
+            parallelism = max(int(parallelism or 1), self._CROSS_DC_PARALLEL_MIN)
+            prefetch = max(int(prefetch or 1), self._CROSS_DC_PREFETCH_MIN)
+            if chunk_size < self.CHUNK_SIZE:
+                chunk_size = self.CHUNK_SIZE
+            LOGGER.info(
+                "ByteStreamer cross-DC file_dc=%s home_dc=%s â†’ parallel=%s prefetch=%s",
+                file_dc,
+                home_dc,
+                parallelism,
+                prefetch,
+            )
+
+        pool_size = 1 + (len(extra_clients) if extra_clients else 0)
+        if pool_size > 1:
+            parallelism = max(parallelism, min(pool_size * 2, 16))
+            prefetch = max(prefetch, parallelism)
+
         now = time.time()
         registry_entry = {
             "stream_id": stream_id,
@@ -150,13 +214,14 @@ class ByteStreamer:
             "part_count": part_count,
             "prefetch": prefetch,
             "meta": meta or {},
+            "cross_dc": cross_dc,
         }
 
         ACTIVE_STREAMS[stream_id] = registry_entry
         stream_entry = registry_entry
-        work_loads[client_index] += 1
+        work_loads[client_index] = work_loads.get(client_index, 0) + 1
 
-        queue_maxsize = max(1, prefetch)
+        queue_maxsize = max(4, prefetch)
         q: asyncio.Queue = asyncio.Queue(maxsize=queue_maxsize)
         stop_event = asyncio.Event()
 
@@ -197,23 +262,33 @@ class ByteStreamer:
                     ec_refresh = await _make_refresh_fn(ec_loc_box, ec_streamer, ec_file_id)
                     session_pool.append((ec_idx, ec_session, ec_loc_box, ec_refresh))
                 except Exception as e:
-                    LOGGER.warning("Skipping extra client %s (session setup failed): %s", ec_idx, e)
+                    LOGGER.warning(
+                        "Skipping extra client %s (session setup failed): %s", ec_idx, e
+                    )
 
-        async def fetch_chunk_with_retries(seq_idx: int, off: int) -> Tuple[int, Optional[bytes]]:
+        max_tries = 5 if cross_dc else 3
+        max_flood = 8 if cross_dc else 5
+        req_timeout = 25.0 if cross_dc else 15.0
+
+        async def fetch_chunk_with_retries(
+            seq_idx: int, off: int
+        ) -> Tuple[int, Optional[bytes]]:
             slot = seq_idx % len(session_pool)
             c_idx, c_session, c_loc_box, c_refresh = session_pool[slot]
 
             tries = 0
             flood_tries = 0
-            while tries < 3 and flood_tries < 5 and not stop_event.is_set():
+            while tries < max_tries and flood_tries < max_flood and not stop_event.is_set():
                 try:
                     r = await asyncio.wait_for(
                         c_session.send(
                             raw.functions.upload.GetFile(
-                                location=c_loc_box[0], offset=off, limit=chunk_size
+                                location=c_loc_box[0],
+                                offset=off,
+                                limit=chunk_size,
                             )
                         ),
-                        timeout=15.0,
+                        timeout=req_timeout,
                     )
                     chunk_bytes = getattr(r, "bytes", None) if r else None
 
@@ -225,7 +300,7 @@ class ByteStreamer:
                 except asyncio.TimeoutError:
                     tries += 1
                     client_failures[c_idx] = client_failures.get(c_idx, 0) + 1
-                    await asyncio.sleep(min(0.5 * (2 ** (tries - 1)), 10.0))
+                    await asyncio.sleep(min(0.3 * (2 ** (tries - 1)), 6.0))
 
                 except Exception as e:
                     err_str = str(e)
@@ -233,16 +308,18 @@ class ByteStreamer:
                     if "FILE_REFERENCE" in err_str or "file_reference" in err_str.lower():
                         await c_refresh()
 
-                    flood_m = re.search(r"wait of (\d+) second", err_str, re.IGNORECASE)
+                    flood_m = re.search(
+                        r"wait of (\d+) second", err_str, re.IGNORECASE
+                    )
                     if flood_m:
                         required = float(flood_m.group(1))
-                        jitter = random.uniform(0.5, 2.0)
+                        jitter = random.uniform(0.3, 1.5)
                         wait = required + jitter
                         flood_tries += 1
                         await asyncio.sleep(wait)
                     else:
                         tries += 1
-                        backoff = min(0.5 * (2 ** (tries - 1)), 10.0)
+                        backoff = min(0.3 * (2 ** (tries - 1)), 6.0)
                         await asyncio.sleep(backoff)
             return seq_idx, None
 
@@ -271,6 +348,8 @@ class ByteStreamer:
                         break
 
                     if not scheduled_tasks:
+                        if next_to_schedule >= part_count:
+                            break
                         seq = next_to_schedule
                         off = offset + seq * chunk_size
                         task = asyncio.create_task(fetch_chunk_with_retries(seq, off))
@@ -278,7 +357,8 @@ class ByteStreamer:
                         next_to_schedule += 1
 
                     done, _ = await asyncio.wait(
-                        scheduled_tasks.values(), return_when=asyncio.FIRST_COMPLETED
+                        scheduled_tasks.values(),
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
 
                     for completed in done:
@@ -304,7 +384,9 @@ class ByteStreamer:
                             if next_to_schedule < part_count:
                                 seq = next_to_schedule
                                 off = offset + seq * chunk_size
-                                task = asyncio.create_task(fetch_chunk_with_retries(seq, off))
+                                task = asyncio.create_task(
+                                    fetch_chunk_with_retries(seq, off)
+                                )
                                 scheduled_tasks[seq] = task
                                 next_to_schedule += 1
 
@@ -333,7 +415,9 @@ class ByteStreamer:
                     pass
                 raise
             except Exception as e:
-                LOGGER.exception("Producer unexpected error for stream %s: %s", stream_id, e)
+                LOGGER.exception(
+                    "Producer unexpected error for stream %s: %s", stream_id, e
+                )
                 try:
                     await q.put((None, None))
                 except Exception:
@@ -345,7 +429,9 @@ class ByteStreamer:
                         if not t.done():
                             t.cancel()
                     try:
-                        await asyncio.gather(*scheduled_tasks.values(), return_exceptions=True)
+                        await asyncio.gather(
+                            *scheduled_tasks.values(), return_exceptions=True
+                        )
                     except Exception:
                         pass
                     scheduled_tasks.clear()
@@ -370,7 +456,9 @@ class ByteStreamer:
                     try:
                         off_chunk = await asyncio.wait_for(q.get(), timeout=90.0)
                     except asyncio.TimeoutError:
-                        LOGGER.error("Producer stall (90 s) for stream %s — aborting", stream_id)
+                        LOGGER.error(
+                            "Producer stall (90 s) for stream %s â€” aborting", stream_id
+                        )
                         stop_event.set()
                         stream_entry["status"] = "error"
                         break
@@ -397,24 +485,33 @@ class ByteStreamer:
                         chunk_len = 0
 
                     now_ts = time.time()
-                    last_ts = stream_entry.get("last_ts") or stream_entry.get("start_ts") or now_ts
+                    last_ts = (
+                        stream_entry.get("last_ts")
+                        or stream_entry.get("start_ts")
+                        or now_ts
+                    )
                     elapsed = now_ts - last_ts
                     if elapsed <= 0:
                         elapsed = 1e-6
 
-                    recent = stream_entry.setdefault("recent_measurements", deque(maxlen=3))
+                    recent = stream_entry.setdefault(
+                        "recent_measurements", deque(maxlen=3)
+                    )
                     recent.append((chunk_len, elapsed))
 
                     if len(recent) >= 2:
                         total_bytes = sum(b for b, _ in recent)
                         total_time = sum(t for _, t in recent)
                         instant_mbps = min(
-                            (total_bytes / (1024 * 1024)) / max(total_time, 0.01), 1000.0
+                            (total_bytes / (1024 * 1024)) / max(total_time, 0.01),
+                            1000.0,
                         )
                     else:
                         instant_mbps = 0.0
 
-                    stream_entry["total_bytes"] = stream_entry.get("total_bytes", 0) + chunk_len
+                    stream_entry["total_bytes"] = (
+                        stream_entry.get("total_bytes", 0) + chunk_len
+                    )
                     stream_entry["last_ts"] = now_ts
 
                     start_ts = stream_entry.get("start_ts") or now_ts
@@ -460,7 +557,9 @@ class ByteStreamer:
                     total_bytes = stream_entry.get("total_bytes", 0)
                     start_ts = stream_entry.get("start_ts") or end_ts
                     duration = end_ts - start_ts if end_ts > start_ts else 0.0
-                    avg_mbps = (total_bytes / (1024 * 1024)) / (duration if duration > 0 else 1e-6)
+                    avg_mbps = (total_bytes / (1024 * 1024)) / (
+                        duration if duration > 0 else 1e-6
+                    )
 
                     stream_entry.update(
                         {
@@ -496,7 +595,9 @@ class ByteStreamer:
                     asyncio.create_task(delayed_pop())
                 finally:
                     try:
-                        work_loads[client_index] -= 1
+                        work_loads[client_index] = max(
+                            0, work_loads.get(client_index, 0) - 1
+                        )
                     except Exception:
                         pass
 
@@ -506,6 +607,8 @@ class ByteStreamer:
 
     async def _get_media_session(self, file_id: FileId) -> Session:
         dc = file_id.dc_id
+        if not hasattr(self.client, "media_sessions"):
+            self.client.media_sessions = {}
         media_session = self.client.media_sessions.get(dc)
 
         if media_session:
@@ -518,41 +621,12 @@ class ByteStreamer:
 
             test_mode = await self.client.storage.test_mode()
             current_dc = await self.client.storage.dc_id()
-
-            if dc != current_dc:
-                auth_key = await Auth(self.client, dc, test_mode).create()
-            else:
-                auth_key = await self.client.storage.auth_key()
-
-            session = Session(self.client, dc, auth_key, test_mode, is_media=True)
-            session.no_updates = True
-            session.timeout = 30
-            session.sleep_threshold = 60
-
-            await session.start()
-
-            if dc != current_dc:
-                for _ in range(6):
-                    try:
-                        exported = await self.client.invoke(
-                            raw.functions.auth.ExportAuthorization(dc_id=dc)
-                        )
-                        await session.send(
-                            raw.functions.auth.ImportAuthorization(
-                                id=exported.id, bytes=exported.bytes
-                            )
-                        )
-                        break
-                    except AuthBytesInvalid:
-                        await asyncio.sleep(0.5)
-                    except OSError:
-                        await asyncio.sleep(1)
-
-            self.client.media_sessions[dc] = session
-            return session
+            return await self._open_media_session(dc, test_mode, current_dc)
 
     @staticmethod
-    async def _get_location(file_id: FileId) -> Union[raw.types.InputDocumentFileLocation,]:
+    async def _get_location(
+        file_id: FileId,
+    ) -> Union[raw.types.InputDocumentFileLocation,]:
         return raw.types.InputDocumentFileLocation(
             id=file_id.media_id,
             access_hash=file_id.access_hash,
