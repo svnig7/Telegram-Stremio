@@ -118,12 +118,12 @@ async def send_start_message(client: Client, message: Message):
             keyboard = InlineKeyboardMarkup(keyboard_rows)
 
             return await message.reply_text(
-                "💎 <b>WELCOME TO STREMIO PREMIUM</b>\n\n"
+                "💎 <b>WELCOME TO STREMIO PREMIUM</b>\n"
                 "Enjoy access to the <b>Stremio Addon</b> and "
                 "<b>Private Group</b> with an active subscription.\n\n"
                 "━━━━━━━━━━━━━━━━━━\n\n"
-                "📋 <b>CHOOSE YOUR PLAN</b>\n\n"
-                "Select a subscription below to continue.\n\n"
+                "📋 <b>CHOOSE YOUR PLAN</b>\n"
+                "Select a subscription below to continue.\n"
                 "🔐 Choose a plan → Complete payment → "
                 "Send screenshot → Get verified access",
                 reply_markup=keyboard,
