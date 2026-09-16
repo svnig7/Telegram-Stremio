@@ -510,7 +510,7 @@ async def get_manifest(token: str, token_data: dict = Depends(verify_token)):
         "id": f"telegram.media.{token[:8]}",
         "version": addon_version,
         "name": addon_name,
-        "logo": "https://i.postimg.cc/XqWnmDXr/Picsart-25-10-09-08-09-45-867.png",
+        "logo": "https://raw.githubusercontent.com/svnig7/svnig7/refs/heads/main/Images/Stremio%20Bot.png",
         "description": addon_desc,
         "types": ["movie", "series"],
         "resources": resources,
