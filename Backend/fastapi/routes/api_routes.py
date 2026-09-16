@@ -687,7 +687,7 @@ async def get_subscription_plans_api() -> dict:
 async def add_subscription_plan_api(payload: dict) -> dict:
     try:
         days = int(payload.get("days", 0))
-        price = float(payload.get("price", 0.0))
+        price = float(payload.get("price", 0))
         currency = str(payload.get("currency") or "INR").upper().strip()
         if days <= 0 or price < 0:
             raise HTTPException(status_code=400, detail="Invalid plan parameters")
@@ -705,7 +705,7 @@ async def add_subscription_plan_api(payload: dict) -> dict:
 async def update_subscription_plan_api(plan_id: str, payload: dict) -> dict:
     try:
         days = int(payload.get("days", 0))
-        price = float(payload.get("price", 0.0))
+        price = float(payload.get("price", 0))
         currency = str(payload.get("currency") or "INR").upper().strip()
         if days <= 0 or price < 0:
              raise HTTPException(status_code=400, detail="Invalid plan parameters")
