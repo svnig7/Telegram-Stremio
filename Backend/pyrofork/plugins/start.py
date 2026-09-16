@@ -43,7 +43,7 @@ async def send_start_message(client: Client, message: Message):
             )
             return
 
-        #----- Subscription mode: verify active subscription, else offer plans
+        # ----- Subscription mode: verify active subscription, else offer plans
         user = await db.get_user(user_id)
         now = datetime.utcnow()
 
@@ -51,32 +51,81 @@ async def send_start_message(client: Client, message: Message):
         if not is_active and user and user.get("subscription_status") == "active":
             await db.mark_user_expired(user_id)
 
-        #----- Honour a manual token grant (never-expires or a future token expiry)
+        # ----- Honour a manual token grant (never-expires or a future token expiry)
         if not is_active:
             token_doc = await db.get_api_token_by_user(user_id)
-            if token_doc and (token_doc.get("subscription_exempt")
-                              or (token_doc.get("expires_at") and token_doc["expires_at"] > now)):
+            if token_doc and (
+                token_doc.get("subscription_exempt")
+                or (
+                    token_doc.get("expires_at")
+                    and token_doc["expires_at"] > now
+                )
+            ):
                 is_active = True
 
         if not is_active:
             plans = await db.get_subscription_plans()
+
             if not plans:
                 return await message.reply_text(
-                    '<b>💎 WELCOME TO STREMIO PREMIUM</b>\n\n'
-                    'Currently, no subscription plans are set up. Please contact the administrator.',
+                    "💎 <b>WELCOME TO STREMIO PREMIUM</b>\n\n"
+                    "Currently, no subscription plans are available.\n"
+                    "Please contact the administrator.",
                     quote=True,
                     parse_mode=enums.ParseMode.HTML
                 )
 
-            keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{plan['days']} Days - {_currency_symbol(plan.get('currency'))}{plan['price']}", callback_data=f"plan_{plan['_id']}")]
-                for plan in plans
-            ])
+            # Plan labels based on duration
+            plan_icons = {
+                1: "🧪",
+                3: "⚡",
+                7: "🔥",
+                30: "⭐",
+                90: "💎",
+                180: "🚀",
+                365: "👑",
+            }
+
+            keyboard_rows = []
+
+            for plan in plans:
+                days = int(plan.get("days", 0))
+                icon = plan_icons.get(days, "📅")
+
+                currency = _currency_symbol(plan.get("currency"))
+
+                # Avoid showing ₹9.0 / ₹99.0
+                price = plan.get("price", 0)
+                try:
+                    price_num = float(price)
+                    if price_num.is_integer():
+                        price_text = str(int(price_num))
+                    else:
+                        price_text = f"{price_num:.2f}".rstrip("0").rstrip(".")
+                except (TypeError, ValueError):
+                    price_text = str(price)
+
+                # Correct singular/plural wording
+                day_text = "Day" if days == 1 else "Days"
+
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        f"{icon} {days} {day_text} — {currency}{price_text}",
+                        callback_data=f"plan_{plan['_id']}"
+                    )
+                ])
+
+            keyboard = InlineKeyboardMarkup(keyboard_rows)
+
             return await message.reply_text(
-                '<b>💎 WELCOME TO STREMIO PREMIUM</b>\n
-                'Access to the <b>Stremio Addon</b> and <b>Private Group</b> requires an active subscription.\n\n'
-                '<b>📋 Choose your plan below to continue:</b>\n'
-                '🔐 Select a plan → Complete payment → Send screenshot → Get verified access',
+                "💎 <b>WELCOME TO STREMIO PREMIUM</b>\n\n"
+                "Enjoy access to the <b>Stremio Addon</b> and "
+                "<b>Private Group</b> with an active subscription.\n\n"
+                "━━━━━━━━━━━━━━━━━━\n\n"
+                "📋 <b>CHOOSE YOUR PLAN</b>\n\n"
+                "Select a subscription below to continue.\n\n"
+                "🔐 Choose a plan → Complete payment → "
+                "Send screenshot → Get verified access",
                 reply_markup=keyboard,
                 quote=True,
                 parse_mode=enums.ParseMode.HTML
