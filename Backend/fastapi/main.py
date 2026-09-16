@@ -209,15 +209,15 @@ async def pwa_manifest(request: Request):
             "theme_color": theme["colors"]["primary"],
             "icons": [
                 {
-                    "src": "/pwa-icon.svg",
-                    "sizes": "any",
-                    "type": "image/svg+xml",
+                    "src": "https://raw.githubusercontent.com/svnig7/svnig7/refs/heads/main/Images/Stremio%20Bot.png",
+                    "sizes": "512x512",
+                    "type": "image/png",
                     "purpose": "any"
                 },
                 {
-                    "src": "/pwa-icon.svg",
-                    "sizes": "any",
-                    "type": "image/svg+xml",
+                    "src": "https://raw.githubusercontent.com/svnig7/svnig7/refs/heads/main/Images/Stremio%20Bot.png",
+                    "sizes": "512x512",
+                    "type": "image/png",
                     "purpose": "maskable"
                 }
             ]
