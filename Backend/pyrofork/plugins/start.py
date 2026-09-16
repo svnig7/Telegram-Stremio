@@ -62,7 +62,7 @@ async def send_start_message(client: Client, message: Message):
             plans = await db.get_subscription_plans()
             if not plans:
                 return await message.reply_text(
-                    '<b>Welcome to the Telegram Stremio Private Group!</b>\n\n'
+                    '<b>💎 WELCOME TO STREMIO PREMIUM</b>\n\n'
                     'Currently, no subscription plans are set up. Please contact the administrator.',
                     quote=True,
                     parse_mode=enums.ParseMode.HTML
@@ -73,9 +73,10 @@ async def send_start_message(client: Client, message: Message):
                 for plan in plans
             ])
             return await message.reply_text(
-                '<b>Welcome to the Telegram Stremio Private Group!</b>\n\n'
-                'Access to this bot and the Stremio Addon requires an active subscription.\n'
-                'Please select a subscription plan below to continue:',
+                '<b>💎 WELCOME TO STREMIO PREMIUM</b>\n
+                'Access to the <b>Stremio Addon</b> and <b>Private Group</b> requires an active subscription.\n\n'
+                '<b>📋 Choose your plan below to continue:</b>\n'
+                '🔐 Select a plan → Complete payment → Send screenshot → Get verified access',
                 reply_markup=keyboard,
                 quote=True,
                 parse_mode=enums.ParseMode.HTML
