@@ -259,7 +259,7 @@ async def service_worker():
         headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"}
     )
 
-@app.get("/status")
+@app.api_route("/status", methods=["GET", "HEAD"])
 async def public_status():
     return {"status": "ok", "version": __version__}
 
