@@ -49,6 +49,7 @@ from Backend.helper.metadata import (
     search_any_candidates,
     search_movie_candidates,
     search_tv_candidates,
+    parse_media_name,
 )
 from Backend.helper.passwords import hash_password, verify_password
 from Backend.helper.pyro import get_readable_file_size, get_readable_time
@@ -1266,6 +1267,71 @@ async def manual_add_media_api(payload: dict) -> dict:
         if not selection:
             raise HTTPException(status_code=404, detail="Could not fetch metadata for the selected title.")
         base = _metadata_base(selection, from_doc=True)
+
+    # Automatic metadata lookup priority for Telegram posts:
+    # 1) Search by the actual Telegram filename.
+    # 2) If no usable result, resolve the IMDb ID in the caption.
+    # 3) If still unresolved, resolve the TMDb ID in the caption.
+    # Explicit admin selections / existing database documents above take priority.
+    if base is None:
+        filename = (primary.get("telegram_filename") or primary.get("name") or "").strip()
+        parsed_name = parse_media_name(filename)
+        filename_title = (parsed_name.get("title") or "").strip()
+        filename_year = parsed_name.get("year")
+        try:
+            filename_year = int(filename_year) if filename_year else None
+        except (TypeError, ValueError):
+            filename_year = None
+
+        if filename_title:
+            try:
+                candidates = await (
+                    search_movie_candidates(filename_title, filename_year, limit=8)
+                    if media_type == "movie"
+                    else search_tv_candidates(filename_title, limit=8)
+                )
+                # Candidate lists are already provider-normalized. Try candidates
+                # in order and accept the first whose full metadata resolves.
+                for candidate in candidates or []:
+                    candidate_id = candidate.get("imdb_id") or candidate.get("tmdb_id")
+                    if not candidate_id:
+                        continue
+                    selection = await (
+                        fetch_selected_movie_metadata(str(candidate_id)) if media_type == "movie"
+                        else fetch_selected_tv_metadata(str(candidate_id))
+                    )
+                    if selection and selection.get("title"):
+                        base = _metadata_base(selection, from_doc=True)
+                        break
+            except Exception as exc:
+                LOGGER.warning(f"Filename metadata search failed for '{filename}': {exc}")
+
+    if base is None:
+        imdb_id = primary.get("caption_imdb_id")
+        if imdb_id:
+            try:
+                selection = await (
+                    fetch_selected_movie_metadata(imdb_id) if media_type == "movie"
+                    else fetch_selected_tv_metadata(imdb_id)
+                )
+                if selection and selection.get("title"):
+                    base = _metadata_base(selection, from_doc=True)
+            except Exception as exc:
+                LOGGER.warning(f"IMDb caption lookup failed for {imdb_id}: {exc}")
+
+    if base is None:
+        caption_tmdb_id = primary.get("caption_tmdb_id")
+        if caption_tmdb_id:
+            try:
+                selection = await (
+                    fetch_selected_movie_metadata(str(caption_tmdb_id)) if media_type == "movie"
+                    else fetch_selected_tv_metadata(str(caption_tmdb_id))
+                )
+                if selection and selection.get("title"):
+                    base = _metadata_base(selection, from_doc=True)
+            except Exception as exc:
+                LOGGER.warning(f"TMDb caption lookup failed for {caption_tmdb_id}: {exc}")
+
     if base is None:
         base = _metadata_base(payload.get("manual_metadata") or {})
         if not base["title"]:
