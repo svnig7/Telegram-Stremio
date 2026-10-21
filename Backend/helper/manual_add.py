@@ -9,6 +9,8 @@ from Backend.helper.task_manager import edit_message
 
 _PRIVATE_LINK = re.compile(r"t\.me/c/(\d+)(?:/\d+)*/(\d+)")
 _PUBLIC_LINK = re.compile(r"t\.me/([A-Za-z][\w]{3,})/(?:\d+/)?(\d+)")
+_IMDB_ID_RE = re.compile(r"(?i)\bIMDb\s*ID\s*:\s*(tt\d{7,10})\b")
+_TMDB_ID_RE = re.compile(r"(?i)\bTMDB\s*ID\s*:\s*(\d+)\b")
 
 
 #----- Parse a Telegram post link into (chat_ref, msg_id).
@@ -58,8 +60,13 @@ async def resolve_telegram_message(client, url: str = None, chat_id=None, msg_id
     #----- Prefer the caption over the raw file name, then normalise it to the exact
     #----- filename receiver.py stores (clean, split-suffix stripped, video extension).
     caption = (getattr(message, "caption", None) or "").strip()
-    raw_name = caption or getattr(media, "file_name", None) or "video"
+    # The Telegram media filename is the search input. Never treat the whole
+    # caption (which may contain plot/IDs/metadata) as the actual filename.
+    telegram_filename = (getattr(media, "file_name", None) or "").strip()
+    raw_name = telegram_filename or caption or "video"
     cleaned = clean_filename(raw_name)
+    imdb_match = _IMDB_ID_RE.search(caption)
+    tmdb_match = _TMDB_ID_RE.search(caption)
     split_info = parse_split_info(cleaned)
     raw_size = getattr(media, "file_size", 0) or 0
     parsed = parse_media_name(strip_part_suffix(cleaned) if split_info else cleaned)
@@ -77,6 +84,10 @@ async def resolve_telegram_message(client, url: str = None, chat_id=None, msg_id
         "chat_id": str(message.chat.id).replace("-100", ""),
         "msg_id": message.id,
         "name": file_name,
+        "telegram_filename": telegram_filename or file_name,
+        "caption": caption,
+        "caption_imdb_id": imdb_match.group(1) if imdb_match else None,
+        "caption_tmdb_id": int(tmdb_match.group(1)) if tmdb_match else None,
         "raw_size": raw_size,
         "size": get_readable_file_size(raw_size),
         "quality": quality,
