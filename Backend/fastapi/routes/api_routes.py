@@ -1362,11 +1362,18 @@ async def manual_add_media_api(payload: dict) -> dict:
 
     tv_extra = {}
     if media_type == "tv":
+        # Prefer explicitly supplied values; otherwise use season/episode parsed
+        # from the Telegram filename (S01E06, E6, Naruto 2 episode 6, etc.).
+        detected_season = primary.get("season")
+        detected_episode = primary.get("episode")
         try:
-            season_number = int(payload.get("season_number"))
-            episode_number = int(payload.get("episode_number"))
+            season_number = int(payload.get("season_number") or detected_season)
+            episode_number = int(payload.get("episode_number") or detected_episode)
         except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="Season and episode numbers are required for TV.")
+            raise HTTPException(
+                status_code=400,
+                detail="Season and episode numbers are required for TV. Add them in the filename (e.g. S01E06, E6, Naruto 2 episode 6) or enter them manually.",
+            )
         tv_extra = {
             "season_number": season_number,
             "episode_number": episode_number,
